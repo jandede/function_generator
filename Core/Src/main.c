@@ -99,23 +99,22 @@ float sinlookup[256] = {3.7649080427748505e-05, 0.00015059065189787502, 0.000338
 0.9969534850011781, 0.9975923633360984, 0.998156306091389, 0.9986452283393451, 0.9990590564500745,
 0.9993977281025862, 0.9996611922941747, 0.9998494093481021, 0.9999623509195723, 1.0,
 };
+// all possible dac output values are calculated once
+float Vout_possible_values[256] = {};
 
+// This consists of PRE-CALCULATED 256 values for each quadrant of sine wave (clock is automatically divided into 1024 steps per function period)
+// Values represent voltages, as indices of Vout_possible_values
 uint8_t sin_voltage_steps[1024] = {};
+
 /*
  * 1 = sine
  * 99 = dac test ramp
  */
 uint8_t func_mode = 1;
-uint8_t MODE_GENERATION = 0;
-// tool global target frequency
-float f = 50e3;
-// all possible dac output values are calculated once
-float Vout_possible_values[256] = {};
+uint8_t MODE_GENERATION = 0; // Function generation is done only when this is 1
+float f = 3e3; // Tool global target frequency
 
-// multiply timer possible value
-uint16_t CLK_SCALER = 0;
-
-#define CPU_FREQ 84000000
+#define CPU_FREQ 84000000  // TIM1 frequency (Clock configuration APB2)
 
 /* USER CODE END PV */
 
@@ -168,9 +167,6 @@ int main(void)
   MX_TIM1_Init();
   /* USER CODE BEGIN 2 */
   calc_dac_values(); // do once on startup
-
-  // LED?
-  HAL_GPIO_TogglePin(GPIOA, GPIO_PIN_5);
 
   /* USER CODE END 2 */
 
@@ -392,6 +388,7 @@ static void MX_GPIO_Init(void)
 
 /* USER CODE BEGIN 4 */
 
+// Runs only at startup
 // Calculates this equation with every 8bit combination (Va-Vh)
 // Vout = (1Va + 2Vb + 4Vc + 8Vd + 16Ve + 32Vf + 64Vg + 128Vh) / 256
 void calc_dac_values(){
@@ -405,7 +402,7 @@ void calc_dac_values(){
 	    }
 }
 
-// Run once initially for optimization
+// Run once when sine mode is started for optimization
 // When a full sine period is divided into 1024 time steps, calculate each timestep voltage index (out of Vout_possible_values)
 void calc_sin_steps(){
 	int index = 0;
@@ -418,17 +415,12 @@ void calc_sin_steps(){
 		// fourth ¼ ´ 	sinlookup[0:128]
 		if (fraction_of_period < 1.0/4.0){
 			index = 127 + (255*2 * fraction_of_period);
-			//index = 0;
 		} else if(fraction_of_period <= 2.0/4.0){
 			index = 255 - (255*2 * (fraction_of_period-0.25));
-			//index = 0;
 		} else if(fraction_of_period <= 3.0/4.0){
 			index = 128 - (255*2 * (fraction_of_period-0.5));
-			asm("nop");
 		} else {
 			index = (255*2 * (fraction_of_period-0.75));
-			//index = 0;
-			asm("nop");
 		}
 		for (int j = 0; j<=255; j++){
 			if (j==255){
@@ -456,16 +448,8 @@ void dac_out(uint8_t val){
 	  HAL_GPIO_WritePin(GPIOC, GPIO_PIN_0, val & (1<<7));
 }
 
-// return time in seconds
-float get_time(){
-	return htim1.Instance->CNT / ((CPU_FREQ*1.0f) / (htim1.Instance->PSC));
-}
-
-//uint8_t _sin(int f, float t_relative){
-//	return sin_voltage_steps[t_relative];
-//}
-
 // Divide timer so that it only ticks 1024 times every 1/f
+// (using 8 bit dac and more ticks doesn't bring any benefits, only makes code more complex ... maybe slower too?)
 void prescale_timer(int16_t sinfreq){
 	float prescaler = (CPU_FREQ*1.0) / (1024.0*sinfreq);
 	// ~0.13 Hz or less..
@@ -481,10 +465,11 @@ void sinefunc(){
 	prescale_timer(f);
 	HAL_TIM_Base_Start_IT(&htim1);
 	while(MODE_GENERATION){
-	dac_out(sin_voltage_steps[htim1.Instance->CNT]);
+		dac_out(sin_voltage_steps[htim1.Instance->CNT]);
 	}
 }
 
+// TODO implement proper interface
 void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin)
 {
     if(GPIO_Pin == GPIO_PIN_11)
