@@ -21,7 +21,9 @@
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
-
+#include "ssd1306.h"
+#include "fonts.h"
+#include "stdio.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -40,7 +42,12 @@
 /* USER CODE END PM */
 
 /* Private variables ---------------------------------------------------------*/
+ADC_HandleTypeDef hadc1;
+
+I2C_HandleTypeDef hi2c1;
+
 TIM_HandleTypeDef htim1;
+TIM_HandleTypeDef htim3;
 
 UART_HandleTypeDef huart2;
 
@@ -113,8 +120,12 @@ uint8_t sin_voltage_steps[1024] = {};
 uint8_t func_mode = 1;
 uint8_t MODE_GENERATION = 0; // Function generation is done only when this is 1
 float f = 3e3; // Tool global target frequency
+uint32_t debounce_timeout = 100e3;
+uint16_t debounce_timer = 0;
+char oled_max_char = 18;
 
-#define CPU_FREQ 84000000  // TIM1 frequency (Clock configuration APB2)
+#define CPU_FREQ 84e6  // TIM1 frequency (Clock configuration APB2)
+#define FMAX 10e3
 
 /* USER CODE END PV */
 
@@ -123,6 +134,9 @@ void SystemClock_Config(void);
 static void MX_GPIO_Init(void);
 static void MX_USART2_UART_Init(void);
 static void MX_TIM1_Init(void);
+static void MX_TIM3_Init(void);
+static void MX_I2C1_Init(void);
+static void MX_ADC1_Init(void);
 /* USER CODE BEGIN PFP */
 
 /* USER CODE END PFP */
@@ -132,6 +146,7 @@ static void MX_TIM1_Init(void);
 void dac_out(uint8_t);
 void sinefunc(void);
 void calc_dac_values(void);
+void print_to_oled(char*, char*);
 /* USER CODE END 0 */
 
 /**
@@ -165,8 +180,15 @@ int main(void)
   MX_GPIO_Init();
   MX_USART2_UART_Init();
   MX_TIM1_Init();
+  MX_TIM3_Init();
+  MX_I2C1_Init();
+  MX_ADC1_Init();
   /* USER CODE BEGIN 2 */
   calc_dac_values(); // do once on startup
+
+  SSD1306_Init (); // initialise the display
+  char oled_buffer_line1[10] = {0};
+  char oled_buffer_line2[10] = {0};
 
   /* USER CODE END 2 */
 
@@ -177,6 +199,9 @@ int main(void)
 	  switch(func_mode){
 	  case 1:
 		  MODE_GENERATION = 1;
+		  sprintf(oled_buffer_line1, "sin()%c", '\0');
+		  sprintf(oled_buffer_line2, "%d Hz%c", (uint16_t) f, '\0');
+		  print_to_oled(oled_buffer_line1, oled_buffer_line2);
 		  sinefunc();
 		  break;
 	  case 99:
@@ -241,6 +266,92 @@ void SystemClock_Config(void)
 }
 
 /**
+  * @brief ADC1 Initialization Function
+  * @param None
+  * @retval None
+  */
+static void MX_ADC1_Init(void)
+{
+
+  /* USER CODE BEGIN ADC1_Init 0 */
+
+  /* USER CODE END ADC1_Init 0 */
+
+  ADC_ChannelConfTypeDef sConfig = {0};
+
+  /* USER CODE BEGIN ADC1_Init 1 */
+
+  /* USER CODE END ADC1_Init 1 */
+
+  /** Configure the global features of the ADC (Clock, Resolution, Data Alignment and number of conversion)
+  */
+  hadc1.Instance = ADC1;
+  hadc1.Init.ClockPrescaler = ADC_CLOCK_SYNC_PCLK_DIV4;
+  hadc1.Init.Resolution = ADC_RESOLUTION_12B;
+  hadc1.Init.ScanConvMode = ENABLE;
+  hadc1.Init.ContinuousConvMode = DISABLE;
+  hadc1.Init.DiscontinuousConvMode = DISABLE;
+  hadc1.Init.ExternalTrigConvEdge = ADC_EXTERNALTRIGCONVEDGE_NONE;
+  hadc1.Init.ExternalTrigConv = ADC_SOFTWARE_START;
+  hadc1.Init.DataAlign = ADC_DATAALIGN_RIGHT;
+  hadc1.Init.NbrOfConversion = 1;
+  hadc1.Init.DMAContinuousRequests = DISABLE;
+  hadc1.Init.EOCSelection = ADC_EOC_SINGLE_CONV;
+  if (HAL_ADC_Init(&hadc1) != HAL_OK)
+  {
+    Error_Handler();
+  }
+
+  /** Configure for the selected ADC regular channel its corresponding rank in the sequencer and its sample time.
+  */
+  sConfig.Channel = ADC_CHANNEL_0;
+  sConfig.Rank = 1;
+  sConfig.SamplingTime = ADC_SAMPLETIME_3CYCLES;
+  if (HAL_ADC_ConfigChannel(&hadc1, &sConfig) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  /* USER CODE BEGIN ADC1_Init 2 */
+
+  /* USER CODE END ADC1_Init 2 */
+
+}
+
+/**
+  * @brief I2C1 Initialization Function
+  * @param None
+  * @retval None
+  */
+static void MX_I2C1_Init(void)
+{
+
+  /* USER CODE BEGIN I2C1_Init 0 */
+
+  /* USER CODE END I2C1_Init 0 */
+
+  /* USER CODE BEGIN I2C1_Init 1 */
+
+  /* USER CODE END I2C1_Init 1 */
+  hi2c1.Instance = I2C1;
+  hi2c1.Init.ClockSpeed = 400000;
+  hi2c1.Init.DutyCycle = I2C_DUTYCYCLE_2;
+  hi2c1.Init.OwnAddress1 = 0;
+  hi2c1.Init.AddressingMode = I2C_ADDRESSINGMODE_7BIT;
+  hi2c1.Init.DualAddressMode = I2C_DUALADDRESS_DISABLE;
+  hi2c1.Init.OwnAddress2 = 0;
+  hi2c1.Init.GeneralCallMode = I2C_GENERALCALL_DISABLE;
+  hi2c1.Init.NoStretchMode = I2C_NOSTRETCH_DISABLE;
+  if (HAL_I2C_Init(&hi2c1) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  /* USER CODE BEGIN I2C1_Init 2 */
+
+  /* USER CODE END I2C1_Init 2 */
+
+}
+
+/**
   * @brief TIM1 Initialization Function
   * @param None
   * @retval None
@@ -283,6 +394,51 @@ static void MX_TIM1_Init(void)
   /* USER CODE BEGIN TIM1_Init 2 */
 
   /* USER CODE END TIM1_Init 2 */
+
+}
+
+/**
+  * @brief TIM3 Initialization Function
+  * @param None
+  * @retval None
+  */
+static void MX_TIM3_Init(void)
+{
+
+  /* USER CODE BEGIN TIM3_Init 0 */
+
+  /* USER CODE END TIM3_Init 0 */
+
+  TIM_ClockConfigTypeDef sClockSourceConfig = {0};
+  TIM_MasterConfigTypeDef sMasterConfig = {0};
+
+  /* USER CODE BEGIN TIM3_Init 1 */
+
+  /* USER CODE END TIM3_Init 1 */
+  htim3.Instance = TIM3;
+  htim3.Init.Prescaler = 8400;
+  htim3.Init.CounterMode = TIM_COUNTERMODE_UP;
+  htim3.Init.Period = 300;
+  htim3.Init.ClockDivision = TIM_CLOCKDIVISION_DIV1;
+  htim3.Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_DISABLE;
+  if (HAL_TIM_Base_Init(&htim3) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  sClockSourceConfig.ClockSource = TIM_CLOCKSOURCE_INTERNAL;
+  if (HAL_TIM_ConfigClockSource(&htim3, &sClockSourceConfig) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  sMasterConfig.MasterOutputTrigger = TIM_TRGO_RESET;
+  sMasterConfig.MasterSlaveMode = TIM_MASTERSLAVEMODE_DISABLE;
+  if (HAL_TIMEx_MasterConfigSynchronization(&htim3, &sMasterConfig) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  /* USER CODE BEGIN TIM3_Init 2 */
+
+  /* USER CODE END TIM3_Init 2 */
 
 }
 
@@ -388,6 +544,27 @@ static void MX_GPIO_Init(void)
 
 /* USER CODE BEGIN 4 */
 
+// OLED screen write to 1st and 2nd line
+void print_to_oled(char* str1, char* str2){
+	SSD1306_Clear();
+	//SSD1306_GotoXY (10,10);
+	/*SSD1306_DrawPixel(10, 5, 1);
+	SSD1306_DrawPixel(11, 4, 1);
+	SSD1306_DrawPixel(12, 3, 1);
+	SSD1306_DrawPixel(13, 2, 1);
+	SSD1306_DrawPixel(14, 1, 1);*/
+	int *oled_sin[21] = {7,5,3,2,1,11,2,3,5,7,9,11,12,13,13,13,12,11,9};
+	for (int j=0;j<4; j++){
+		for (int i=0;i<19;i++){
+			SSD1306_DrawPixel(10+20*j+i, oled_sin[i], 1);
+		}
+	}
+	//SSD1306_Puts (str1, &Font_11x18, 1);
+	SSD1306_GotoXY (10,30);
+	SSD1306_Puts (str2, &Font_11x18, 1);
+	SSD1306_UpdateScreen();
+}
+
 // Runs only at startup
 // Calculates this equation with every 8bit combination (Va-Vh)
 // Vout = (1Va + 2Vb + 4Vc + 8Vd + 16Ve + 32Vf + 64Vg + 128Vh) / 256
@@ -463,25 +640,41 @@ void prescale_timer(int16_t sinfreq){
 void sinefunc(){
 	calc_sin_steps();
 	prescale_timer(f);
-	HAL_TIM_Base_Start_IT(&htim1);
+	HAL_TIM_Base_Start(&htim1);
 	while(MODE_GENERATION){
 		dac_out(sin_voltage_steps[htim1.Instance->CNT]);
 	}
 }
 
-// TODO implement proper interface
 void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin)
 {
     if(GPIO_Pin == GPIO_PIN_11)
     {
-    	HAL_TIM_Base_Stop_IT(&htim1);
-    	MODE_GENERATION = 0;
-    	f += 100;
+    	if (!debounce_timer){
+    		debounce_timer = 1;
+    		HAL_TIM_Base_Start_IT(&htim3); //start background clock for debouncing
+    		HAL_TIM_Base_Stop(&htim1);
+			MODE_GENERATION = 0;
+			HAL_ADC_Start(&hadc1);
+			HAL_ADC_PollForConversion(&hadc1, 10);
+			f = (uint16_t) HAL_ADC_GetValue(&hadc1)/4095.0 * FMAX;
+		    HAL_ADC_Stop(&hadc1);
+		    if (f > FMAX || f < 1){
+		    	f = 3002;
+		    }
+    	}
+
     }
 }
 
-void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim){
 
+void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim){
+	// Debounce timeout, clear for next button press
+	if (htim->Instance==TIM3){
+		HAL_TIM_Base_Stop_IT(&htim3);
+		TIM3->CNT = 0;
+		debounce_timer = 0;
+	}
 }
 
 /* USER CODE END 4 */
