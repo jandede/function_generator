@@ -114,18 +114,29 @@ float Vout_possible_values[256] = {};
 uint8_t sin_voltage_steps[1024] = {};
 
 /*
- * 1 = sine
- * 99 = dac test ramp
+ * 0 = sine
+ * 1 = square
+ * 2 = triangle
+ * 3 = saw
  */
-uint8_t func_mode = 1;
-uint8_t MODE_GENERATION = 0; // Function generation is done only when this is 1
-float f = 3e3; // Tool global target frequency
-uint32_t debounce_timeout = 100e3;
-uint16_t debounce_timer = 0;
-char oled_max_char = 18;
+volatile uint8_t func_mode = 3;
+volatile uint8_t MODE_GENERATION = 0; // Function generation is done only when this is 1
+volatile float f = 500; // Tool global target frequency
+volatile float f_temp = 0;
+volatile uint8_t button_pressed = 0;
+
+volatile uint8_t request_display_refresh = 0;
+char oled_buffer_line1[10] = {0};
+char oled_buffer_line2[10] = {0};
+// Copy buffers for prev/current display content comparison so display can be updated without clearing
+char new_oled_buffer_line1[10] = {0};
+char new_oled_buffer_line2[10] = {0};
 
 #define CPU_FREQ 84e6  // TIM1 frequency (Clock configuration APB2)
-#define FMAX 10e3
+#define FMAX 25e3      // Tool maximum frequency
+#define OLEDFONTWIDTH 11  // see fonts.h
+// If button is pressed for X consecutive ticks, it is a long press
+#define LONGPRESSFACTOR 0b00111111
 
 /* USER CODE END PV */
 
@@ -145,8 +156,12 @@ static void MX_ADC1_Init(void);
 /* USER CODE BEGIN 0 */
 void dac_out(uint8_t);
 void sinefunc(void);
+void squarefunc(void);
+void trianglefunc(void);
+void sawfunc(void);
 void calc_dac_values(void);
 void print_to_oled(char*, char*);
+void refresh_menu_display(void);
 /* USER CODE END 0 */
 
 /**
@@ -157,7 +172,6 @@ int main(void)
 {
 
   /* USER CODE BEGIN 1 */
-
   /* USER CODE END 1 */
 
   /* MCU Configuration--------------------------------------------------------*/
@@ -184,11 +198,19 @@ int main(void)
   MX_I2C1_Init();
   MX_ADC1_Init();
   /* USER CODE BEGIN 2 */
-  calc_dac_values(); // do once on startup
+  // Determine all possible dac combinations:voltage values; do once on startup
+  calc_dac_values();
 
-  SSD1306_Init (); // initialise the display
-  char oled_buffer_line1[10] = {0};
-  char oled_buffer_line2[10] = {0};
+  SSD1306_Init ();
+  request_display_refresh = 1;
+  htim1.Instance->PSC = 8400;
+  htim1.Instance->CCR1 = 1023;  // DAC clock has 1024 samples per frequency period
+  HAL_TIM_Base_Start_IT(&htim1);
+  htim3.Instance->PSC = 8400;
+  // This determines short press duration (and long press but it is multiplied by a factor)
+  htim3.Instance->ARR = 800;
+  HAL_TIM_Base_Start_IT(&htim3);
+
 
   /* USER CODE END 2 */
 
@@ -196,20 +218,33 @@ int main(void)
   /* USER CODE BEGIN WHILE */
   while (1)
   {
-	  switch(func_mode){
-	  case 1:
-		  MODE_GENERATION = 1;
-		  sprintf(oled_buffer_line1, "sin()%c", '\0');
-		  sprintf(oled_buffer_line2, "%d Hz%c", (uint16_t) f, '\0');
-		  print_to_oled(oled_buffer_line1, oled_buffer_line2);
-		  sinefunc();
-		  break;
-	  case 99:
-		  for (int i = 0; i <256; i++){
-			  dac_out(Vout_possible_values[i]);
-			  HAL_Delay(20);
+	  if (MODE_GENERATION){
+		  HAL_TIM_Base_Stop_IT(&htim1);
+		  switch(func_mode){
+		  case 0:
+			  request_display_refresh = 1;
+			  refresh_menu_display();
+			  sinefunc();
+			  break;
+		  case 1:
+			  request_display_refresh = 1;
+			  refresh_menu_display();
+			  squarefunc();
+			  break;
+		  case 2:
+			  request_display_refresh = 1;
+			  refresh_menu_display();
+			  trianglefunc();
+			  break;
+		  case 3:
+			  request_display_refresh = 1;
+			  refresh_menu_display();
+			  sawfunc();
+			  break;
 		  }
-		  break;
+	  } else {
+		  // In selection menu
+		  refresh_menu_display();
 	  }
 
     /* USER CODE END WHILE */
@@ -418,7 +453,7 @@ static void MX_TIM3_Init(void)
   htim3.Instance = TIM3;
   htim3.Init.Prescaler = 8400;
   htim3.Init.CounterMode = TIM_COUNTERMODE_UP;
-  htim3.Init.Period = 300;
+  htim3.Init.Period = 10000;
   htim3.Init.ClockDivision = TIM_CLOCKDIVISION_DIV1;
   htim3.Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_DISABLE;
   if (HAL_TIM_Base_Init(&htim3) != HAL_OK)
@@ -543,26 +578,67 @@ static void MX_GPIO_Init(void)
 }
 
 /* USER CODE BEGIN 4 */
+// Initialize string to "\0\0\0..."
+void strclr(char *str, uint8_t len){
+	for (int i = 0; i < len; i++){
+		str[i] = 0;
+	}
+}
 
-// OLED screen write to 1st and 2nd line
-void print_to_oled(char* str1, char* str2){
-	SSD1306_Clear();
-	//SSD1306_GotoXY (10,10);
-	/*SSD1306_DrawPixel(10, 5, 1);
-	SSD1306_DrawPixel(11, 4, 1);
-	SSD1306_DrawPixel(12, 3, 1);
-	SSD1306_DrawPixel(13, 2, 1);
-	SSD1306_DrawPixel(14, 1, 1);*/
-	int *oled_sin[21] = {7,5,3,2,1,11,2,3,5,7,9,11,12,13,13,13,12,11,9};
-	for (int j=0;j<4; j++){
-		for (int i=0;i<19;i++){
-			SSD1306_DrawPixel(10+20*j+i, oled_sin[i], 1);
+void refresh_menu_display(){
+	if (!request_display_refresh) return;
+	if (func_mode == 0){
+		sprintf(&new_oled_buffer_line1, "SIN      ");
+	} else if (func_mode == 1){
+		sprintf(&new_oled_buffer_line1, "SQUARE   ");
+	} else if (func_mode == 2){
+		sprintf(&new_oled_buffer_line1, "TRIANGLE  ");
+	} else if (func_mode == 3){
+		sprintf(&new_oled_buffer_line1, "SAW      ");
+	}
+	if (!MODE_GENERATION){
+		// Display "W" to indicate that we are in menu
+		new_oled_buffer_line1[8] = 'W';
+	}
+	new_oled_buffer_line1[9] = '\0';
+	// Fill line2 with frequency info
+	sprintf(&new_oled_buffer_line2, "%d Hz%c", (uint16_t) f, '\0');
+	uint8_t break_string = 0;
+	// update only parts that have changed to reduce flickering
+	for (int i = 0; i < 9; i++){
+		if(!new_oled_buffer_line1[i]) break_string=1;
+		if (break_string){
+			SSD1306_GotoXY(10+i*OLEDFONTWIDTH,10);
+			SSD1306_Putc(' ', &Font_11x18, 1);
+		} else {
+			if (new_oled_buffer_line1[i] < 32 || new_oled_buffer_line1[i] >= 126) continue;
+			if (oled_buffer_line1[i] != new_oled_buffer_line1[i]){
+				SSD1306_GotoXY(10+i*OLEDFONTWIDTH,10);
+				SSD1306_Putc(new_oled_buffer_line1[i], &Font_11x18, 1);
+			}
 		}
 	}
-	//SSD1306_Puts (str1, &Font_11x18, 1);
-	SSD1306_GotoXY (10,30);
-	SSD1306_Puts (str2, &Font_11x18, 1);
+	break_string = 0;
+	for (int i = 0; i < 9; i++){
+		if(!new_oled_buffer_line2[i]) break_string=1;
+		if (break_string){
+			SSD1306_GotoXY(10+i*OLEDFONTWIDTH,30);
+			SSD1306_Putc(' ', &Font_11x18, 1);
+		}
+		else {
+			if (new_oled_buffer_line2[i] < 32 || new_oled_buffer_line2[i] >= 126) continue;
+			if (oled_buffer_line2[i] != new_oled_buffer_line2[i]){
+				SSD1306_GotoXY(10+i*OLEDFONTWIDTH,30);
+				SSD1306_Putc(new_oled_buffer_line2[i], &Font_11x18, 1);
+			}
+		}
+	}
+	strclr(oled_buffer_line1,9);
+	strclr(oled_buffer_line2,9);
+	sprintf(&oled_buffer_line1, &new_oled_buffer_line1);
+	sprintf(&oled_buffer_line2, &new_oled_buffer_line2);
 	SSD1306_UpdateScreen();
+	request_display_refresh = 0;
 }
 
 // Runs only at startup
@@ -628,12 +704,7 @@ void dac_out(uint8_t val){
 // Divide timer so that it only ticks 1024 times every 1/f
 // (using 8 bit dac and more ticks doesn't bring any benefits, only makes code more complex ... maybe slower too?)
 void prescale_timer(int16_t sinfreq){
-	float prescaler = (CPU_FREQ*1.0) / (1024.0*sinfreq);
-	// ~0.13 Hz or less..
-	if (prescaler >= 65535){
-		asm("nop");
-	}
-	htim1.Instance->PSC = prescaler;
+	htim1.Instance->PSC = (CPU_FREQ*1.0) / (1024.0*sinfreq);
 }
 
 // Main loop when SINE is selected as tool mode
@@ -644,36 +715,113 @@ void sinefunc(){
 	while(MODE_GENERATION){
 		dac_out(sin_voltage_steps[htim1.Instance->CNT]);
 	}
+	dac_out(0);  // reset gpio pin states
 }
 
-void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin)
-{
-    if(GPIO_Pin == GPIO_PIN_11)
-    {
-    	if (!debounce_timer){
-    		debounce_timer = 1;
-    		HAL_TIM_Base_Start_IT(&htim3); //start background clock for debouncing
-    		HAL_TIM_Base_Stop(&htim1);
-			MODE_GENERATION = 0;
-			HAL_ADC_Start(&hadc1);
-			HAL_ADC_PollForConversion(&hadc1, 10);
-			f = (uint16_t) HAL_ADC_GetValue(&hadc1)/4095.0 * FMAX;
-		    HAL_ADC_Stop(&hadc1);
-		    if (f > FMAX || f < 1){
-		    	f = 3002;
-		    }
-    	}
-
-    }
+void squarefunc(){
+	prescale_timer(f);
+	uint16_t timstep = 0;
+	HAL_TIM_Base_Start(&htim1);
+	while(MODE_GENERATION){
+		timstep = TIM1->CNT;
+		if(timstep < 1024/2){
+			dac_out(255);
+		} else {
+			dac_out(0);
+		}
+	}
+	dac_out(0);
 }
 
+void trianglefunc(){
+	prescale_timer(f);
+	uint16_t timstep = 0;
+	HAL_TIM_Base_Start(&htim1);
+	while(MODE_GENERATION){
+		timstep = TIM1->CNT;
+		if(timstep < 1024/2){
+			dac_out(timstep/2);
+		} else {
+			dac_out(255-(timstep/2));
+		}
+	}
+	dac_out(0);
+}
+
+void sawfunc(){
+	prescale_timer(f);
+	uint16_t timstep = 0;
+	HAL_TIM_Base_Start(&htim1);
+	while(MODE_GENERATION){
+		timstep = TIM1->CNT;
+		dac_out(timstep/4-1);
+	}
+	dac_out(0);
+}
+
+// Rounds value to nearest 100
+float round_frequency(float freq){
+	return (float) ((uint16_t) freq - (uint16_t) freq % 100);
+}
 
 void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim){
-	// Debounce timeout, clear for next button press
+	// TIM3 is used for detecting button presses only
 	if (htim->Instance==TIM3){
-		HAL_TIM_Base_Stop_IT(&htim3);
-		TIM3->CNT = 0;
-		debounce_timer = 0;
+		uint8_t longpress = 0;
+		if(!HAL_GPIO_ReadPin(GPIOC, GPIO_PIN_11)){
+			button_pressed = (button_pressed << 1) | 1;
+		} else {
+			button_pressed = (button_pressed << 1) & ~1;
+		}
+		// Falling edge detection, button is released, check if it was pressed for a short time or held
+		if ((button_pressed & 0b00000011) == 0b00000010){
+			if (button_pressed >= LONGPRESSFACTOR){
+					longpress = 1;
+				}
+			HAL_TIM_Base_Stop_IT(&htim1);
+			// Button is clicked  in tool mode, ignore long presses
+			if (MODE_GENERATION && !longpress){
+				MODE_GENERATION = 0;  // return to menu mode
+			// Button is clicked  in menu mode
+			} else {
+				// long press cycles functions, does not start tool mode
+				if (longpress){
+					func_mode++;
+					if (func_mode > 3) {
+						func_mode = 0;
+					}
+				// Button clicking starts tool mode in displayed function and frequency
+				} else {
+					MODE_GENERATION = 1;
+				}
+			}
+			// clear button timing array after a command is detected
+			button_pressed = 0;
+			request_display_refresh = 1;
+			refresh_menu_display();
+			TIM1->CNT = 0;
+			HAL_TIM_Base_Start_IT(&htim1);
+		}
+	}
+	// TIM1 interrupts are used for potentiometer reading IN MENU MODE
+	// TIM1 is also used in function timing IN TOOL MODE but without interrupts
+	if (htim-> Instance==TIM1){
+		float adcval = 0.0;
+		HAL_ADC_Start(&hadc1);
+		HAL_ADC_PollForConversion(&hadc1, 10);
+		adcval = HAL_ADC_GetValue(&hadc1)/4095.0 * FMAX;
+		f_temp = f;
+		if (adcval < 50){
+			f = 10;
+		} else {
+			f = round_frequency(adcval);
+		}
+		HAL_ADC_Stop(&hadc1);
+		if (f < f_temp - 80 || f > f_temp + 80){  // hysteresis because adc setup is noisy...
+			request_display_refresh = 1;
+		} else {
+			f = f_temp;  // Revert value if conditions aren't met
+		}
 	}
 }
 
